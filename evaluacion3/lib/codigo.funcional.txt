@@ -1,0 +1,467 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data'; // Necesario para leer bytes en la web
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
+import 'package:geolocator/geolocator.dart';
+
+// --- CONFIGURACIÓN ---
+// Cambia esto por tu IP local (no uses localhost si pruebas en celular real)
+const String baseUrl = "http://localhost:8000"; 
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Paquexpress',
+      theme: ThemeData(primarySwatch: Colors.indigo),
+      home: const LoginScreen(),
+    );
+  }
+}
+
+// ---------------------------------------------------------
+// 1. PANTALLA DE LOGIN
+// ---------------------------------------------------------
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _userController = TextEditingController();
+  final TextEditingController _passController = TextEditingController();
+
+  Future<void> _login() async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/login'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "username": _userController.text,
+          "password": _passController.text
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final role = data['role'];
+        final userId = data['user_id'];
+
+        if (role == 'ADMIN') {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AdminHomeScreen()));
+        } else {
+          Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => WorkerHomeScreen(userId: userId)));
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Credenciales Inválidas")));
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Paquexpress Login")),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            TextField(controller: _userController, decoration: const InputDecoration(labelText: "Usuario")),
+            TextField(controller: _passController, decoration: const InputDecoration(labelText: "Contraseña"), obscureText: true),
+            const SizedBox(height: 20),
+            ElevatedButton(onPressed: _login, child: const Text("Iniciar Sesión"))
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------
+// 2. ROL ADMINISTRADOR
+// ---------------------------------------------------------
+class AdminHomeScreen extends StatefulWidget {
+  const AdminHomeScreen({super.key});
+  @override
+  State<AdminHomeScreen> createState() => _AdminHomeScreenState();
+}
+
+class _AdminHomeScreenState extends State<AdminHomeScreen> {
+  List packages = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchPackages();
+  }
+
+  Future<void> _fetchPackages() async {
+    final response = await http.get(Uri.parse('$baseUrl/packages'));
+    if (response.statusCode == 200) {
+      setState(() {
+        packages = jsonDecode(response.body);
+      });
+    }
+  }
+
+  Future<void> _deletePackage(int id) async {
+    await http.delete(Uri.parse('$baseUrl/packages/$id'));
+    _fetchPackages();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Panel Administrador")),
+      body: ListView.builder(
+        itemCount: packages.length,
+        itemBuilder: (context, index) {
+          final p = packages[index];
+          return Card(
+            child: ListTile(
+              leading: Icon(Icons.inventory, color: p['delivery_status'] == 'ENTREGADO' ? Colors.green : Colors.orange),
+              title: Text("Paquete #${p['package_id']} - ${p['description']}"),
+              subtitle: Text("Destino: ${p['destination_address']}\nEstado: ${p['delivery_status']}"),
+              isThreeLine: true,
+              trailing: IconButton(
+                icon: const Icon(Icons.delete, color: Colors.red),
+                onPressed: () => _deletePackage(p['package_id']),
+              ),
+              // Aquí podrías agregar onTap para editar
+            ),
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        child: const Icon(Icons.add),
+        onPressed: () async {
+          await Navigator.push(context, MaterialPageRoute(builder: (_) => const AddPackageScreen()));
+          _fetchPackages();
+        },
+      ),
+    );
+  }
+}
+
+class AddPackageScreen extends StatefulWidget {
+  const AddPackageScreen({super.key});
+  @override
+  State<AddPackageScreen> createState() => _AddPackageScreenState();
+}
+
+class _AddPackageScreenState extends State<AddPackageScreen> {
+  final _addressCtrl = TextEditingController();
+  final _descCtrl = TextEditingController();
+  List workers = [];
+  int? selectedWorkerId;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchWorkers();
+  }
+
+  Future<void> _fetchWorkers() async {
+    final response = await http.get(Uri.parse('$baseUrl/workers'));
+    if (response.statusCode == 200) {
+      setState(() {
+        workers = jsonDecode(response.body);
+      });
+    }
+  }
+
+  Future<void> _savePackage() async {
+    if (selectedWorkerId == null) return;
+    await http.post(
+      Uri.parse('$baseUrl/packages'),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "user_id": selectedWorkerId,
+        "destination_address": _addressCtrl.text,
+        "description": _descCtrl.text
+      }),
+    );
+    if(mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Asignar Paquete")),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            DropdownButton<int>(
+              hint: const Text("Seleccionar Trabajador"),
+              value: selectedWorkerId,
+              isExpanded: true,
+              items: workers.map((w) {
+                return DropdownMenuItem<int>(
+                  value: w['user_id'],
+                  child: Text(w['full_name']),
+                );
+              }).toList(),
+              onChanged: (val) => setState(() => selectedWorkerId = val),
+            ),
+            TextField(controller: _addressCtrl, decoration: const InputDecoration(labelText: "Dirección de Destino")),
+            TextField(controller: _descCtrl, decoration: const InputDecoration(labelText: "Descripción del Paquete")),
+            const SizedBox(height: 20),
+            ElevatedButton(onPressed: _savePackage, child: const Text("Guardar y Asignar"))
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------
+// 3. ROL TRABAJADOR
+// ---------------------------------------------------------
+class WorkerHomeScreen extends StatefulWidget {
+  final int userId;
+  const WorkerHomeScreen({super.key, required this.userId});
+
+  @override
+  State<WorkerHomeScreen> createState() => _WorkerHomeScreenState();
+}
+
+class _WorkerHomeScreenState extends State<WorkerHomeScreen> {
+  List myPackages = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchMyPackages();
+  }
+
+  Future<void> _fetchMyPackages() async {
+    final response = await http.get(Uri.parse('$baseUrl/my-packages/${widget.userId}'));
+    if (response.statusCode == 200) {
+      setState(() {
+        myPackages = jsonDecode(response.body);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Mis Entregas Pendientes")),
+      body: ListView.builder(
+        itemCount: myPackages.length,
+        itemBuilder: (context, index) {
+          final p = myPackages[index];
+          return Card(
+            child: ListTile(
+              leading: const Icon(Icons.local_shipping, color: Colors.blue),
+              title: Text("Paquete #${p['package_id']}"),
+              subtitle: Text(p['destination_address']),
+              trailing: const Icon(Icons.arrow_forward_ios),
+              onTap: () async {
+                await Navigator.push(
+                  context, 
+                  MaterialPageRoute(builder: (_) => DeliveryDetailScreen(package: p, agentId: widget.userId))
+                );
+                _fetchMyPackages(); // Recargar al volver
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class DeliveryDetailScreen extends StatefulWidget {
+  final Map package;
+  final int agentId;
+  const DeliveryDetailScreen({super.key, required this.package, required this.agentId});
+
+  @override
+  State<DeliveryDetailScreen> createState() => _DeliveryDetailScreenState();
+}
+
+class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
+  // CAMBIO 1: Usamos XFile (multiplataforma) en lugar de dart:io File
+  XFile? _pickedImage;
+  // CAMBIO 2: Variable auxiliar para guardar los bytes si estamos en Web
+  Uint8List? _webImageBytes;
+
+  Position? _position;
+  bool _isLoading = false;
+
+  // --- FUNCIÓN CORREGIDA PARA TOMAR FOTO ---
+  Future<void> _takePhoto() async {
+    final picker = ImagePicker();
+    // Nota: En navegadores de escritorio, ImageSource.camera puede fallar si no hay webcam.
+    // En navegadores móviles funciona bien.
+    final XFile? pickedFile = await picker.pickImage(
+      source: ImageSource.camera,
+      maxWidth: 800, // Recomendado: reducir tamaño para subir más rápido
+      imageQuality: 85,
+    );
+
+    if (pickedFile != null) {
+      if (kIsWeb) {
+        // SI ES WEB: Leemos los bytes para poder mostrarla en memoria
+        final bytes = await pickedFile.readAsBytes();
+        setState(() {
+          _pickedImage = pickedFile;
+          _webImageBytes = bytes;
+        });
+      } else {
+        // SI ES MÓVIL: Solo guardamos la referencia
+        setState(() {
+          _pickedImage = pickedFile;
+        });
+      }
+    }
+  }
+
+  Future<void> _getLocation() async {
+    // (Esta función queda igual que antes)
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    // Verificar de nuevo por si el usuario denegó el permiso
+    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Se requiere permiso de ubicación")));
+       return;
+    }
+
+    Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    setState(() {
+      _position = position;
+    });
+  }
+
+  // --- FUNCIÓN CORREGIDA PARA SUBIR LA FOTO ---
+  Future<void> _completeDelivery() async {
+    // Verificamos _pickedImage en lugar de _image
+    if (_pickedImage == null || _position == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Foto y Ubicación requeridas")));
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    
+    // Aseguramos que la URL sea correcta. Si pruebas en web, baseUrl debe ser localhost
+    // Si usas emulador Android, 10.0.2.2 está bien.
+    var uri = Uri.parse('$baseUrl/deliver'); 
+    var request = http.MultipartRequest('POST', uri);
+    
+    request.fields['package_id'] = widget.package['package_id'].toString();
+    request.fields['agent_id'] = widget.agentId.toString();
+    request.fields['latitude'] = _position!.latitude.toString();
+    request.fields['longitude'] = _position!.longitude.toString();
+    
+    // --- CORRECCIÓN CRÍTICA PARA SUBIR ARCHIVO ---
+    if (kIsWeb) {
+      // EN WEB: Subimos usando los bytes
+      if (_webImageBytes != null) {
+        request.files.add(http.MultipartFile.fromBytes(
+          'file', 
+          _webImageBytes!,
+          filename: 'upload_${DateTime.now().millisecondsSinceEpoch}.jpg'
+        ));
+      }
+    } else {
+      // EN MÓVIL: Subimos usando la ruta (path)
+      request.files.add(await http.MultipartFile.fromPath('file', _pickedImage!.path));
+    }
+    // -------------------------------------------
+
+    try {
+      var response = await request.send();
+      setState(() => _isLoading = false);
+
+      if (response.statusCode == 200) {
+        if(mounted) {
+          Navigator.pop(context); 
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Entrega Registrada!")));
+        }
+      } else {
+         // Es útil ver el error si falla
+         final respStr = await response.stream.bytesToString();
+         print("Error subida: ${response.statusCode} - $respStr");
+        if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error al registrar: ${response.statusCode}")));
+      }
+    } catch (e) {
+       setState(() => _isLoading = false);
+       print("Excepción de red: $e");
+       if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error de conexión: $e")));
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _getLocation(); 
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text("Entregar Paquete #${widget.package['package_id']}")),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text("Destino:", style: Theme.of(context).textTheme.headlineSmall),
+            Text(widget.package['destination_address'], style: const TextStyle(fontSize: 18)),
+            const SizedBox(height: 20),
+            
+            Text("Descripción:", style: Theme.of(context).textTheme.headlineSmall),
+            Text(widget.package['description'] ?? "Sin descripción"),
+            const Divider(height: 40),
+
+            // --- CORRECCIÓN CRÍTICA PARA MOSTRAR IMAGEN ---
+            _pickedImage == null
+                ? Container(height: 150, color: Colors.grey[200], child: const Icon(Icons.camera_alt, size: 50))
+                : (kIsWeb && _webImageBytes != null)
+                    // SI ES WEB: Usamos Image.memory
+                    ? Image.memory(_webImageBytes!, height: 200, fit: BoxFit.cover)
+                    // SI ES MÓVIL: Usamos Image.file (convirtiendo el XFile a File)
+                    : Image.file(File(_pickedImage!.path), height: 200, fit: BoxFit.cover),
+            // ---------------------------------------------
+            
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.camera),
+              label: const Text("Capturar Evidencia"),
+              onPressed: _takePhoto,
+            ),
+            
+            const SizedBox(height: 20),
+            Text("GPS: ${_position != null ? 'Detectado (${_position!.latitude.toStringAsFixed(4)}, ${_position!.longitude.toStringAsFixed(4)})' : 'Buscando...'}", style: const TextStyle(fontWeight: FontWeight.bold)),
+            
+            const SizedBox(height: 20),
+            _isLoading 
+              ? const Center(child: CircularProgressIndicator())
+              : ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+                  onPressed: _completeDelivery,
+                  child: const Text("CONFIRMAR ENTREGA"),
+                )
+          ],
+        ),
+      ),
+    );
+  }
+}
